@@ -1,4 +1,4 @@
-# rga Example Finder
+# rga Finder for Arch Linux
 
 A small native desktop app (C++/Qt) that turns your personal library of **PDF** and
 **EPUB** books into a searchable concordance. Type a word and it shows **every**
