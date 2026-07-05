@@ -1,4 +1,4 @@
-# rga Finder for Arch Linux
+# rga Example Finder
 
 A small native desktop app (C++/Qt) that turns your personal library of **PDF** and
 **EPUB** books into a searchable concordance. Type a word and it shows **every**
@@ -13,20 +13,24 @@ and renders results in a native window — no browser, no local server.
 ## Features
 
 - **Every hit, grouped by file.** Unlike a library full-text search that returns one
-  result per book, this lists all matches.
+  result per book, this lists all matches, grouped under a collapsible heading per file.
 - **Sentence extraction.** Shows the full sentence containing the word (from the
-  previous terminator to the next), rebuilt across line breaks for PDFs whose text is
-  split into short fragments.
+  previous terminator to the next). For PDFs whose text is split into short fragments,
+  the sentence is rebuilt across line breaks using surrounding context.
 - **Page / position badges.** PDFs show `p.N`; EPUBs (which have no fixed pages) show a
   reading position such as `58%`.
 - **Multi-language.** English, Japanese, Chinese, French, Italian, German, Spanish.
   Whole-word matching (`-w`) is disabled automatically for Japanese/Chinese, and
   sentence splitting understands both Latin (`. ! ?`) and CJK (`。！？`) terminators.
-- **Multiple folders.** Search across several directories at once.
-- **Partial or whole-word search**, with matches highlighted in either mode.
-- **Collapsible per-file list.** Click a file heading to hide/show its matches, or use
-  *Collapse all* / *Expand all*.
-- **Selectable text**, so example sentences can be copied out easily.
+- **Whole-word or partial search**, with matches highlighted in either mode.
+- **Search multiple folders and/or individual files.** Add folders and single files
+  from the file pickers, or type paths directly (one per line).
+- **Per-file source directory.** Each result shows the folder its file lives in, so you
+  can tell files apart when searching across several directories.
+- **"Only this file".** From any result, re-run the current search against just that one
+  file to focus in.
+- **Collapsible list** with *Collapse all* / *Expand all*, plus selectable text so
+  example sentences can be copied out easily.
 
 ## Requirements
 
@@ -74,17 +78,21 @@ application menu.
 ## Usage
 
 1. Type a search word (any supported language).
-2. Enter one or more folders to search, one per line (or use **Add folder…**).
-3. Press **Search**.
+2. List the folders and/or files to search, one per line. Use **Add folder…** or
+   **Add file…** to pick them, or type paths directly (`~` is expanded to your home).
+3. Press **Search** (or Enter).
 
-Results are grouped by file. Click a file heading to collapse or expand its matches.
+Results are grouped by file, newest-and-most-frequent first. Each heading shows the
+file's directory beneath it. Click a heading to collapse or expand its matches, use
+**Collapse all** / **Expand all** to fold the whole list, or press **Only this file** on
+a result to narrow the current search down to that single book.
 
 ## How it works
 
 `rga` converts each PDF/EPUB to plain text (PDF via poppler, EPUB via pandoc) and
-searches it with ripgrep, emitting JSON. The app parses that JSON, reconstructs the
-sentence around each match, computes a page or position badge, and displays the results
-grouped by file.
+searches it with ripgrep, emitting JSON with a few lines of surrounding context. The app
+parses that JSON, rebuilds the sentence around each match, computes a page or position
+badge, and displays the results grouped by file.
 
 ## Notes and limitations
 
@@ -97,4 +105,5 @@ grouped by file.
   extracted text).
 
 ## License
+
 MIT
