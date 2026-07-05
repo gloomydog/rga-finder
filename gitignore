@@ -1,0 +1,9 @@
+# Build output
+rga-gui
+/build/
+*.o
+*.obj
+
+# Editor / OS cruft
+*.swp
+.DS_Store
