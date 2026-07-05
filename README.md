@@ -97,5 +97,3 @@ grouped by file.
   extracted text).
 
 ## License
-
-MIT
