@@ -1,4 +1,4 @@
-# rga Example Finder
+# Word Finder based on rga
 
 A small native desktop app (C++/Qt) that turns your personal library of **PDF** and
 **EPUB** books into a searchable concordance. Type a word and it shows **every**
