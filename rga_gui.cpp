@@ -5,10 +5,11 @@
 //   Languages: English, Japanese, Chinese, French, Italian, German, Spanish
 //   (whole-word -w is auto-disabled for CJK). Searches across multiple folders; for
 //   PDFs it rebuilds full sentences. Results shown as a collapsible per-file list.
+//   Each file shows its parent directory, and can be re-searched on its own.
 //
 // ---- Build (Arch) ---------------------------------------------------------
 //   sudo pacman -S qt6-base
-//   g++ -std=c++17 -fPIC rga_gui.cpp -o rga-gui \
+//   g++ -std=c++17 -fPIC rga_gui.cpp -o rga-gui
 //       $(pkg-config --cflags --libs Qt6Widgets)
 //   ./rga-gui
 //
@@ -46,6 +47,7 @@
 #include <QMap>
 #include <QVector>
 #include <QStringList>
+#include <functional>
 #include <memory>
 #include <algorithm>
 #include <cmath>
@@ -57,7 +59,13 @@ struct Hit {
     qint64 offset = -1;
     QString sentence;
 };
-struct RenderedBook { QString title; int count = 0; QString hitsHtml; };
+struct RenderedBook {
+    QString title;
+    QString path;         // full file path (used to search this file alone)
+    QString dirDisplay;   // parent directory, home-abbreviated
+    int count = 0;
+    QString hitsHtml;
+};
 struct BuildResult { QVector<RenderedBook> books; int total = 0; bool skipped = false; };
 
 // -------------------------------------------------------------- Language detection
@@ -77,7 +85,7 @@ static QRegularExpression makeWordRegex(const QString &word, bool wholeWord) {
     const QString esc = QRegularExpression::escape(word);
     const QString pat = wholeWord ? ("\\b(" + esc + ")\\b") : ("(" + esc + ")");
     return QRegularExpression(pat, QRegularExpression::CaseInsensitiveOption
-                                   | QRegularExpression::UseUnicodePropertiesOption);
+    | QRegularExpression::UseUnicodePropertiesOption);
 }
 
 // -------------------------------------------------------------- Helpers
@@ -104,7 +112,7 @@ static QString highlight(const QString &text, const QRegularExpression &wre) {
 static void niceTitle(const QString &path, QString &title, QString &author) {
     static const QRegularExpression extRe(
         QStringLiteral("\\.(epub|pdf|mobi|azw3?|txt|docx?|fb2|odt)$"),
-        QRegularExpression::CaseInsensitiveOption);
+                                          QRegularExpression::CaseInsensitiveOption);
     QString base = QFileInfo(path).fileName();
     base.remove(extRe);
     const QStringList parts = base.split(QStringLiteral(" -- "));
@@ -112,6 +120,16 @@ static void niceTitle(const QString &path, QString &title, QString &author) {
     title.replace(QLatin1Char('_'), QLatin1Char(' '));
     author.clear();
     if (parts.size() > 1) { author = parts.value(1).trimmed(); author.remove(QLatin1Char('_')); }
+}
+
+// Parent directory of a file, with the home directory shown as "~".
+static QString dirDisplayOf(const QString &path) {
+    QString parent = QFileInfo(path).absolutePath();
+    const QString home = QDir::homePath();
+    if (parent == home) return QStringLiteral("~");
+    if (parent.startsWith(home + QLatin1Char('/')))
+        parent = QStringLiteral("~") + parent.mid(home.length());
+    return parent;
 }
 
 static void clearLayout(QLayout *lay) {
@@ -144,11 +162,11 @@ static BuildResult buildResults(const QByteArray &out, const QByteArray &err,
         const QString type = o.value(QStringLiteral("type")).toString();
         const QJsonObject data = o.value(QStringLiteral("data")).toObject();
         const QString path = data.value(QStringLiteral("path")).toObject()
-                                 .value(QStringLiteral("text")).toString();
+        .value(QStringLiteral("text")).toString();
 
         if (type == QLatin1String("match") || type == QLatin1String("context")) {
             QString raw = data.value(QStringLiteral("lines")).toObject()
-                              .value(QStringLiteral("text")).toString();
+            .value(QStringLiteral("text")).toString();
             while (raw.endsWith(QLatin1Char('\n')) || raw.endsWith(QLatin1Char('\r'))) raw.chop(1);
             int page = -1; QString text;
             const auto m = pageRe.match(raw);
@@ -166,18 +184,17 @@ static BuildResult buildResults(const QByteArray &out, const QByteArray &err,
             }
         } else if (type == QLatin1String("end")) {
             bytesByPath[path] = data.value(QStringLiteral("stats")).toObject()
-                                    .value(QStringLiteral("bytes_searched")).toInteger(0);
+            .value(QStringLiteral("bytes_searched")).toInteger(0);
         }
     }
 
     BuildResult result;
     result.skipped = QString::fromUtf8(err).contains(QStringLiteral("Could not find executable"));
 
-    // Build (title, author, hits) first, then sort books by match count.
-    struct TmpBook { QString title, author; QVector<Hit> hits; };
+    struct TmpBook { QString path, title, author; QVector<Hit> hits; };
     QVector<TmpBook> tmp;
     for (const QString &path : order) {
-        TmpBook b;
+        TmpBook b; b.path = path;
         niceTitle(path, b.title, b.author);
         const QMap<int, QString> &lm = fileLines.value(path);
         const qint64 bytes = bytesByPath.value(path, 0);
@@ -235,21 +252,23 @@ static BuildResult buildResults(const QByteArray &out, const QByteArray &err,
     for (const TmpBook &b : tmp) {
         RenderedBook rb;
         rb.title = b.title;
+        rb.path = b.path;
+        rb.dirDisplay = dirDisplayOf(b.path);
         rb.count = b.hits.size();
         QString html = QStringLiteral("<div style=\"color:#2b2622;\">");
         if (!b.author.isEmpty())
             html += QStringLiteral("<div style=\"color:#8a8178;margin:2px 0 8px;\"><small>%1</small></div>")
-                        .arg(b.author.toHtmlEscaped());
+            .arg(b.author.toHtmlEscaped());
         for (const Hit &h : b.hits) {
             QString badge;
             if (h.page >= 0)         badge = QStringLiteral("p.%1").arg(h.page);
             else if (h.percent >= 0) badge = QStringLiteral("%1%").arg(h.percent);
             const QString badgeHtml = badge.isEmpty() ? QString()
-                : QStringLiteral("<span style=\"background-color:#efe7d6;color:#8a5a2b;"
-                                 "\">&nbsp;%1&nbsp;</span> ").arg(badge);
+            : QStringLiteral("<span style=\"background-color:#efe7d6;color:#8a5a2b;"
+            "\">&nbsp;%1&nbsp;</span> ").arg(badge);
             html += QStringLiteral(
                 "<p style=\"margin:8px 0;font-family:Georgia,serif;font-size:15px;\">%1%2</p>")
-                .arg(badgeHtml, highlight(h.sentence, wre));
+            .arg(badgeHtml, highlight(h.sentence, wre));
         }
         html += QStringLiteral("</div>");
         rb.hitsHtml = html;
@@ -257,185 +276,229 @@ static BuildResult buildResults(const QByteArray &out, const QByteArray &err,
         result.books.append(rb);
     }
     return result;
-}
+                                }
 
-// -------------------------------------------------------------- main
-int main(int argc, char *argv[]) {
-    QApplication app(argc, argv);
+                                // -------------------------------------------------------------- main
+                                int main(int argc, char *argv[]) {
+                                    QApplication app(argc, argv);
 
-    QWidget window;
-    window.setWindowTitle(QStringLiteral("rga Example Finder"));
-    window.resize(900, 700);
-    auto *root = new QVBoxLayout(&window);
+                                    QWidget window;
+                                    window.setWindowTitle(QStringLiteral("rga Example Finder"));
+                                    window.resize(900, 720);
+                                    auto *root = new QVBoxLayout(&window);
 
-    // --- Search term row ---
-    auto *row1 = new QHBoxLayout();
-    auto *wordEdit = new QLineEdit();
-    wordEdit->setPlaceholderText(QStringLiteral("Search word (any language)"));
-    auto *searchBtn = new QPushButton(QStringLiteral("Search"));
-    auto *wbCheck = new QCheckBox(QStringLiteral("Whole word (-w)")); wbCheck->setChecked(true);
-    wbCheck->setToolTip(QStringLiteral("Ignored automatically for Japanese/Chinese"));
-    auto *icCheck = new QCheckBox(QStringLiteral("Ignore case (-i)")); icCheck->setChecked(true);
-    row1->addWidget(wordEdit, 1);
-    row1->addWidget(searchBtn);
-    row1->addWidget(wbCheck);
-    row1->addWidget(icCheck);
-    root->addLayout(row1);
+                                    // --- Search term row ---
+                                    auto *row1 = new QHBoxLayout();
+                                    auto *wordEdit = new QLineEdit();
+                                    wordEdit->setPlaceholderText(QStringLiteral("Search word (any language)"));
+                                    auto *searchBtn = new QPushButton(QStringLiteral("Search"));
+                                    auto *wbCheck = new QCheckBox(QStringLiteral("Whole word (-w)")); wbCheck->setChecked(true);
+                                    wbCheck->setToolTip(QStringLiteral("Ignored automatically for Japanese/Chinese"));
+                                    auto *icCheck = new QCheckBox(QStringLiteral("Ignore case (-i)")); icCheck->setChecked(true);
+                                    row1->addWidget(wordEdit, 1);
+                                    row1->addWidget(searchBtn);
+                                    row1->addWidget(wbCheck);
+                                    row1->addWidget(icCheck);
+                                    root->addLayout(row1);
 
-    // --- Folder list (one per line) ---
-    root->addWidget(new QLabel(QStringLiteral("Search folders (one per line):")));
-    auto *dirRow = new QHBoxLayout();
-    auto *dirEdit = new QPlainTextEdit(QDir::homePath() + QStringLiteral("/Downloads/books"));
-    dirEdit->setMaximumHeight(78);
-    auto *addBtn = new QPushButton(QStringLiteral("Add folder…"));
-    dirRow->addWidget(dirEdit, 1);
-    dirRow->addWidget(addBtn, 0, Qt::AlignTop);
-    root->addLayout(dirRow);
+                                    // --- Folders and files (one per line) ---
+                                    root->addWidget(new QLabel(QStringLiteral("Search folders and files (one per line):")));
+                                    auto *dirRow = new QHBoxLayout();
+                                    auto *dirEdit = new QPlainTextEdit(QDir::homePath() + QStringLiteral("/Downloads/books"));
+                                    dirEdit->setMaximumHeight(78);
+                                    auto *btnCol = new QVBoxLayout();
+                                    auto *addBtn = new QPushButton(QStringLiteral("Add folder…"));
+                                    auto *addFileBtn = new QPushButton(QStringLiteral("Add file…"));
+                                    btnCol->addWidget(addBtn);
+                                    btnCol->addWidget(addFileBtn);
+                                    btnCol->addStretch();
+                                    dirRow->addWidget(dirEdit, 1);
+                                    dirRow->addLayout(btnCol);
+                                    root->addLayout(dirRow);
 
-    // --- Status + expand/collapse-all button ---
-    auto *toolRow = new QHBoxLayout();
-    auto *status = new QLabel(QStringLiteral(" "));
-    status->setStyleSheet(QStringLiteral("color:#8a8178;"));
-    auto *toggleAllBtn = new QPushButton(QStringLiteral("Collapse all"));
-    toggleAllBtn->setEnabled(false);
-    toolRow->addWidget(status, 1);
-    toolRow->addWidget(toggleAllBtn);
-    root->addLayout(toolRow);
+                                    // --- Status + expand/collapse-all button ---
+                                    auto *toolRow = new QHBoxLayout();
+                                    auto *status = new QLabel(QStringLiteral(" "));
+                                    status->setStyleSheet(QStringLiteral("color:#8a8178;"));
+                                    auto *toggleAllBtn = new QPushButton(QStringLiteral("Collapse all"));
+                                    toggleAllBtn->setEnabled(false);
+                                    toolRow->addWidget(status, 1);
+                                    toolRow->addWidget(toggleAllBtn);
+                                    root->addLayout(toolRow);
 
-    // --- Results (scrollable accordion) ---
-    auto *scroll = new QScrollArea();
-    scroll->setWidgetResizable(true);
-    scroll->setStyleSheet(QStringLiteral("QScrollArea{background:#fffdf8;border:1px solid #e4ddd0;}"));
-    auto *resultsContainer = new QWidget();
-    auto *resultsLayout = new QVBoxLayout(resultsContainer);
-    resultsLayout->setAlignment(Qt::AlignTop);
-    scroll->setWidget(resultsContainer);
-    root->addWidget(scroll, 1);
+                                    // --- Results (scrollable accordion) ---
+                                    auto *scroll = new QScrollArea();
+                                    scroll->setWidgetResizable(true);
+                                    scroll->setStyleSheet(QStringLiteral("QScrollArea{background:#fffdf8;border:1px solid #e4ddd0;}"));
+                                    auto *resultsContainer = new QWidget();
+                                    auto *resultsLayout = new QVBoxLayout(resultsContainer);
+                                    resultsLayout->setAlignment(Qt::AlignTop);
+                                    scroll->setWidget(resultsContainer);
+                                    root->addWidget(scroll, 1);
 
-    auto *proc = new QProcess(&window);
-    auto headers = std::make_shared<QVector<QToolButton*>>();
+                                    auto *proc = new QProcess(&window);
+                                    auto headers = std::make_shared<QVector<QToolButton*>>();
 
-    // Add folder
-    QObject::connect(addBtn, &QPushButton::clicked, [=]() {
-        const QString dir = QFileDialog::getExistingDirectory(
-            dirEdit, QStringLiteral("Add folder"), QDir::homePath());
-        if (dir.isEmpty()) return;
-        QString t = dirEdit->toPlainText();
-        if (!t.isEmpty() && !t.endsWith(QLatin1Char('\n'))) t += QLatin1Char('\n');
-        dirEdit->setPlainText(t + dir);
-    });
+                                    auto appendPath = [=](const QString &p) {
+                                        if (p.isEmpty()) return;
+                                        QString t = dirEdit->toPlainText();
+                                        if (!t.isEmpty() && !t.endsWith(QLatin1Char('\n'))) t += QLatin1Char('\n');
+                                        dirEdit->setPlainText(t + p);
+                                    };
 
-    // Expand / collapse all
-    QObject::connect(toggleAllBtn, &QPushButton::clicked, [=]() {
-        bool anyOpen = false;
-        for (auto *h : *headers) if (h->isChecked()) { anyOpen = true; break; }
-        for (auto *h : *headers) h->setChecked(!anyOpen);
-        toggleAllBtn->setText(anyOpen ? QStringLiteral("Expand all")
-                                      : QStringLiteral("Collapse all"));
-    });
+                                    QObject::connect(addBtn, &QPushButton::clicked, [=]() {
+                                        appendPath(QFileDialog::getExistingDirectory(dirEdit, QStringLiteral("Add folder"), QDir::homePath()));
+                                    });
+                                    QObject::connect(addFileBtn, &QPushButton::clicked, [=]() {
+                                        appendPath(QFileDialog::getOpenFileName(
+                                            dirEdit, QStringLiteral("Add file"), QDir::homePath(),
+                                                                                QStringLiteral("Books (*.pdf *.epub *.mobi *.azw3 *.txt);;All files (*)")));
+                                    });
 
-    // Run search
-    auto doSearch = [=]() {
-        const QString word = wordEdit->text().trimmed();
-        if (word.isEmpty()) return;
-        QStringList dirs;
-        for (QString d : dirEdit->toPlainText().split(QLatin1Char('\n'))) {
-            d = d.trimmed();
-            if (d.isEmpty()) continue;
-            if (d.startsWith(QLatin1Char('~'))) d = QDir::homePath() + d.mid(1);
-            dirs << d;
-        }
-        if (dirs.isEmpty()) { status->setText(QStringLiteral("Add at least one folder.")); return; }
-        QStringList args;
-        args << QStringLiteral("--json") << QStringLiteral("--context") << QStringLiteral("3");
-        if (!isCJK(word) && wbCheck->isChecked()) args << QStringLiteral("-w");
-        if (icCheck->isChecked()) args << QStringLiteral("-i");
-        args << QStringLiteral("--") << word;
-        for (const QString &d : dirs) args << d;
-        searchBtn->setEnabled(false);
-        status->setText(QStringLiteral("Searching…"));
-        proc->start(QStringLiteral("rga"), args);
-    };
-    QObject::connect(searchBtn, &QPushButton::clicked, doSearch);
-    QObject::connect(wordEdit, &QLineEdit::returnPressed, doSearch);
+                                    // Run rga against an explicit list of paths (folders and/or single files).
+                                    std::function<void(const QStringList&)> runSearch = [=](const QStringList &paths) {
+                                        const QString word = wordEdit->text().trimmed();
+                                        if (word.isEmpty()) return;
+                                        if (paths.isEmpty()) { status->setText(QStringLiteral("Add at least one folder or file.")); return; }
+                                        QStringList args;
+                                        args << QStringLiteral("--json") << QStringLiteral("--context") << QStringLiteral("3");
+                                        if (!isCJK(word) && wbCheck->isChecked()) args << QStringLiteral("-w");
+                                        if (icCheck->isChecked()) args << QStringLiteral("-i");
+                                        args << QStringLiteral("--") << word;
+                                        for (const QString &p : paths) args << p;
+                                        searchBtn->setEnabled(false);
+                                        status->setText(QStringLiteral("Searching…"));
+                                        proc->start(QStringLiteral("rga"), args);
+                                    };
 
-    QObject::connect(proc, &QProcess::errorOccurred, [=](QProcess::ProcessError e) {
-        if (e == QProcess::FailedToStart) {
-            status->setText(QStringLiteral("rga not found. Install: sudo pacman -S ripgrep-all"));
-            searchBtn->setEnabled(true);
-        }
-    });
+                                    // Collect the paths typed in the box (each line is a folder or a file).
+                                    auto gatherPaths = [=]() -> QStringList {
+                                        QStringList paths;
+                                        for (QString d : dirEdit->toPlainText().split(QLatin1Char('\n'))) {
+                                            d = d.trimmed();
+                                            if (d.isEmpty()) continue;
+                                            if (d.startsWith(QLatin1Char('~'))) d = QDir::homePath() + d.mid(1);
+                                            paths << d;
+                                        }
+                                        return paths;
+                                    };
 
-    QObject::connect(proc, &QProcess::finished, [=](int code, QProcess::ExitStatus) {
-        const QByteArray out = proc->readAllStandardOutput();
-        const QByteArray err = proc->readAllStandardError();
-        searchBtn->setEnabled(true);
+                                    auto doSearch = [=]() { runSearch(gatherPaths()); };
+                                    QObject::connect(searchBtn, &QPushButton::clicked, doSearch);
+                                    QObject::connect(wordEdit, &QLineEdit::returnPressed, doSearch);
 
-        clearLayout(resultsLayout);
-        headers->clear();
+                                    QObject::connect(toggleAllBtn, &QPushButton::clicked, [=]() {
+                                        bool anyOpen = false;
+                                        for (auto *h : *headers) if (h->isChecked()) { anyOpen = true; break; }
+                                        for (auto *h : *headers) h->setChecked(!anyOpen);
+                                        toggleAllBtn->setText(anyOpen ? QStringLiteral("Expand all")
+                                        : QStringLiteral("Collapse all"));
+                                    });
 
-        if (code == 2 && out.trimmed().isEmpty()) {
-            status->setText(QStringLiteral("Error: ") + QString::fromUtf8(err).trimmed());
-            toggleAllBtn->setEnabled(false);
-            return;
-        }
+                                    QObject::connect(proc, &QProcess::errorOccurred, [=](QProcess::ProcessError e) {
+                                        if (e == QProcess::FailedToStart) {
+                                            status->setText(QStringLiteral("rga not found. Install: sudo pacman -S ripgrep-all"));
+                                            searchBtn->setEnabled(true);
+                                        }
+                                    });
 
-        const QString w = wordEdit->text().trimmed();
-        const bool ww = wbCheck->isChecked() && !isCJK(w);
-        const BuildResult r = buildResults(out, err, w, ww);
-        status->setText(QStringLiteral("%1 matches / %2 books").arg(r.total).arg(r.books.size()));
+                                    QObject::connect(proc, &QProcess::finished, [=](int code, QProcess::ExitStatus) {
+                                        const QByteArray out = proc->readAllStandardOutput();
+                                        const QByteArray err = proc->readAllStandardError();
+                                        searchBtn->setEnabled(true);
 
-        if (r.skipped) {
-            auto *warn = new QLabel(QStringLiteral(
-                "Some files were skipped (pandoc/poppler may be missing)."));
-            warn->setWordWrap(true);
-            warn->setStyleSheet(QStringLiteral("color:#8a5a2b;background:#fff4e0;padding:6px;"));
-            resultsLayout->addWidget(warn);
-        }
-        if (r.books.isEmpty()) {
-            auto *none = new QLabel(QStringLiteral("No matches"));
-            none->setStyleSheet(QStringLiteral("color:#8a8178;padding:8px;"));
-            resultsLayout->addWidget(none);
-            toggleAllBtn->setEnabled(false);
-            return;
-        }
+                                        clearLayout(resultsLayout);
+                                        headers->clear();
 
-        for (const RenderedBook &rb : r.books) {
-            // File header (click to collapse/expand)
-            auto *header = new QToolButton();
-            header->setText(QStringLiteral("%1  (%2)").arg(rb.title).arg(rb.count));
-            header->setCheckable(true);
-            header->setChecked(true);
-            header->setArrowType(Qt::DownArrow);
-            header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-            header->setAutoRaise(true);
-            header->setCursor(Qt::PointingHandCursor);
-            header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-            header->setStyleSheet(QStringLiteral(
-                "QToolButton{font-weight:bold;font-size:14px;border:none;"
-                "padding:8px 4px;text-align:left;color:#2b2622;}"
-                "QToolButton:hover{background:#f4efe4;}"));
+                                        if (code == 2 && out.trimmed().isEmpty()) {
+                                            status->setText(QStringLiteral("Error: ") + QString::fromUtf8(err).trimmed());
+                                            toggleAllBtn->setEnabled(false);
+                                            return;
+                                        }
 
-            // Body (matches, with highlight)
-            auto *content = new QLabel(rb.hitsHtml);
-            content->setTextFormat(Qt::RichText);
-            content->setWordWrap(true);
-            content->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            content->setStyleSheet(QStringLiteral("QLabel{padding:0 12px 8px 22px;}"));
+                                        const QString w = wordEdit->text().trimmed();
+                                        const bool ww = wbCheck->isChecked() && !isCJK(w);
+                                        const BuildResult r = buildResults(out, err, w, ww);
+                                        status->setText(QStringLiteral("%1 matches / %2 books").arg(r.total).arg(r.books.size()));
 
-            QObject::connect(header, &QToolButton::toggled, [content, header](bool on) {
-                content->setVisible(on);
-                header->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
-            });
+                                        if (r.skipped) {
+                                            auto *warn = new QLabel(QStringLiteral(
+                                                "Some files were skipped (pandoc/poppler may be missing)."));
+                                            warn->setWordWrap(true);
+                                            warn->setStyleSheet(QStringLiteral("color:#8a5a2b;background:#fff4e0;padding:6px;"));
+                                            resultsLayout->addWidget(warn);
+                                        }
+                                        if (r.books.isEmpty()) {
+                                            auto *none = new QLabel(QStringLiteral("No matches"));
+                                            none->setStyleSheet(QStringLiteral("color:#8a8178;padding:8px;"));
+                                            resultsLayout->addWidget(none);
+                                            toggleAllBtn->setEnabled(false);
+                                            return;
+                                        }
 
-            resultsLayout->addWidget(header);
-            resultsLayout->addWidget(content);
-            headers->append(header);
-        }
-        toggleAllBtn->setEnabled(true);
-        toggleAllBtn->setText(QStringLiteral("Collapse all"));
-    });
+                                        for (const RenderedBook &rb : r.books) {
+                                            // File header: toggle button + "Only this file" button + directory line.
+                                            auto *headerWidget = new QWidget();
+                                            auto *hv = new QVBoxLayout(headerWidget);
+                                            hv->setContentsMargins(0, 0, 0, 0);
+                                            hv->setSpacing(0);
 
-    window.show();
-    return app.exec();
-}
+                                            auto *topRow = new QHBoxLayout();
+                                            topRow->setContentsMargins(0, 0, 0, 0);
+
+                                            auto *header = new QToolButton();
+                                            header->setText(QStringLiteral("%1  (%2)").arg(rb.title).arg(rb.count));
+                                            header->setCheckable(true);
+                                            header->setChecked(true);
+                                            header->setArrowType(Qt::DownArrow);
+                                            header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+                                            header->setAutoRaise(true);
+                                            header->setCursor(Qt::PointingHandCursor);
+                                            header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+                                            header->setStyleSheet(QStringLiteral(
+                                                "QToolButton{font-weight:bold;font-size:14px;border:none;"
+                                                "padding:8px 4px;text-align:left;color:#2b2622;}"
+                                                "QToolButton:hover{background:#f4efe4;}"));
+
+                                            auto *onlyBtn = new QToolButton();
+                                            onlyBtn->setText(QStringLiteral("Only this file"));
+                                            onlyBtn->setAutoRaise(true);
+                                            onlyBtn->setCursor(Qt::PointingHandCursor);
+                                            onlyBtn->setToolTip(QStringLiteral("Search the current word in this file only"));
+                                            onlyBtn->setStyleSheet(QStringLiteral(
+                                                "QToolButton{color:#8a5a2b;border:1px solid #e4ddd0;border-radius:4px;padding:3px 8px;}"
+                                                "QToolButton:hover{background:#f4efe4;}"));
+                                            const QString filePath = rb.path;
+                                            QObject::connect(onlyBtn, &QToolButton::clicked,
+                                                             [runSearch, filePath]() { runSearch(QStringList{filePath}); });
+
+                                            topRow->addWidget(header, 1);
+                                            topRow->addWidget(onlyBtn, 0, Qt::AlignVCenter);
+                                            hv->addLayout(topRow);
+
+                                            auto *dirLabel = new QLabel(rb.dirDisplay);
+                                            dirLabel->setStyleSheet(QStringLiteral("color:#8a8178;font-size:11px;padding:0 0 4px 22px;"));
+                                            hv->addWidget(dirLabel);
+
+                                            auto *content = new QLabel(rb.hitsHtml);
+                                            content->setTextFormat(Qt::RichText);
+                                            content->setWordWrap(true);
+                                            content->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                                            content->setStyleSheet(QStringLiteral("QLabel{padding:0 12px 8px 22px;}"));
+
+                                            QObject::connect(header, &QToolButton::toggled, [content, header](bool on) {
+                                                content->setVisible(on);
+                                                header->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+                                            });
+
+                                            resultsLayout->addWidget(headerWidget);
+                                            resultsLayout->addWidget(content);
+                                            headers->append(header);
+                                        }
+                                        toggleAllBtn->setEnabled(true);
+                                        toggleAllBtn->setText(QStringLiteral("Collapse all"));
+                                    });
+
+                                    window.show();
+                                    return app.exec();
+                                }
